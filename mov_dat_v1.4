@@ -1,0 +1,344 @@
+import os
+import csv
+import json
+import requests
+from io import BytesIO
+from PIL import Image
+from imdb import Cinemagoer
+import PySimpleGUI as sg
+from collections import Counter
+
+# Display settings
+sg.set_options(font=('Arial', 10))
+header = ('Arial Bold', 16)
+sg.theme('DarkBlue3')
+
+class Movie:
+    def __init__(self):
+        self.id = ''
+        self.title = ''
+        self.director = []
+        self.cast = []
+        self.genres = []
+        self.runtime = 0
+        self.poster = ''
+        self.year_released = ''
+        self.rating = 0
+        self.certificate = []
+        self.my_rating = 0
+        self.plot = ''
+        self.watched = 0
+        self.year_watched = ''
+        self.favorite = 0
+
+# Function to serialize Movie object to JSON string
+def serialize_movie(movie):
+    return json.dumps(movie.__dict__)
+
+# Function to deserialize JSON string to Movie object
+def deserialize_movie(json_str):
+    movie_dict = json.loads(json_str)
+    movie = Movie()
+    movie.__dict__.update(movie_dict)
+    return movie
+
+# Initialize existing database
+database = []
+script_dir = os.path.dirname(os.path.abspath(__file__))
+relative_folder = 'Movie'
+folder_path = os.path.join(script_dir, relative_folder)
+filename = 'mov_database.csv'
+filepath = os.path.join(folder_path, filename)
+
+# Import database from CSV file
+def import_from_csv(filepath):
+    database = []
+    if os.path.exists(filepath):
+        with open(filepath, mode='r', newline='') as file:
+            reader = csv.reader(file)
+            header = next(reader)
+            for row in reader:
+                if row[3]:  # Check if Movie column is not empty
+                    row[3] = deserialize_movie(row[3])
+                database.append(row)
+    return database
+
+database = import_from_csv(filepath)
+
+# Export database to CSV file
+def export_to_csv(filepath, data):
+    with open(filepath, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Title', 'Year', 'Director', 'Movie'])  # Header
+        for row in data:
+            if isinstance(row[3], Movie):
+                writer.writerow([row[0], row[1], row[2], serialize_movie(row[3])])
+            else:
+                writer.writerow(row)
+
+ia = Cinemagoer()
+
+# Update database if changes are made to data collected
+def update_database():
+    for index, entry in enumerate(database):
+        movie_id = entry[3].id
+        # Variables to save over
+        myrat = entry[3].my_rating
+        year_watched = entry[3].year_watched
+        fav = entry[3].favorite
+        updated_entry = populate_entry(movie_id)
+        if updated_entry:
+            updated_entry.my_rating = myrat
+            updated_entry.year_watched = year_watched
+            updated_entry.favorite = fav
+            updated_entry.watched = 1
+            database[index][3] = updated_entry
+            
+# Only get certificate from the United States and not including TV releases
+def find_cert(movie):
+    cert = []
+    try:
+        for i in movie['certificates']:
+            if "United States" in i:
+                cert.append(i)
+            if "TV" in i:
+                cert = cert[:-1]
+        clean_cert = cert[0].replace('United States:', '')
+        return clean_cert
+    except:
+        return 'Not Rated'
+    
+def populate_entry(id):
+    movie = ia.get_movie(id)
+    try:
+        if movie['kind'] == 'movie':
+            entry = Movie()
+            entry.id = movie.movieID
+            entry.title = movie['title']
+            entry.director = [d['name'] for d in movie['director']]
+            entry.cast = [c['name'] for c in movie['cast']]
+            entry.genres = movie['genres']
+            entry.runtime = movie['runtimes'][0] if 'runtimes' in movie else 'N/A'
+            entry.poster = url_clean(movie['cover url']) if 'cover url' in movie else ''
+            entry.year_released = movie['year']
+            entry.certificate = find_cert(movie)
+            entry.rating = movie.get('rating', 0)
+            entry.plot = movie['plot'][0] if 'plot' in movie else 'N/A'
+            return entry
+    except Exception as e:
+        print(f"Error processing movie {movie.movieID}: {e}")
+    return None
+
+# To get higher res posters
+def url_clean(url):
+    base, ext = os.path.splitext(url)
+    i = url.count('@')
+    s2 = url.split('@')[0]
+    url = s2 + '@' * i + ext
+    return url
+
+def search_mov(title):
+    search_array = []
+    search = ia.search_movie(title)
+    for i in range(min(3, len(search))):
+        id = search[i].movieID
+        existing_entry = find_existing_movie(id)
+        if existing_entry:
+            search_array.append(existing_entry)
+        else:
+            entry = populate_entry(id)
+            if entry:
+                search_array.append(entry)
+    return search_array
+
+def find_existing_movie(id):
+    for entry in database:
+        if entry[3].id == id:
+            return entry[3]
+    return None
+
+def mov_display_row(results):
+    data = []
+    for i in range(len(results)):
+        row = [results[i].title, results[i].year_released, ", ".join(results[i].director), results[i]]
+        data.append(row)
+    return data
+
+def resize_image(image, max_width, max_height):
+    width, height = image.size
+    scaling_factor = min(max_width / width, max_height / height)
+    new_size = (int(width * scaling_factor), int(height * scaling_factor))
+    return image.resize(new_size, Image.Resampling.LANCZOS)
+
+def display_image_from_url(image_url, max_width=150, max_height=220):
+    try:
+        response = requests.get(image_url)
+        image_data = response.content
+        image = Image.open(BytesIO(image_data))
+        resized_image = resize_image(image, max_width, max_height)
+        with BytesIO() as bio:
+            resized_image.save(bio, format="PNG")
+            image_bytes = bio.getvalue()
+        return image_bytes
+    except Exception as e:
+        print(f"Error loading image: {e}")
+        return None
+
+def open_mov_popup(entry, index=None):
+    layout = [
+        [
+            sg.Column([
+                [sg.Image(data=display_image_from_url(entry.poster))],
+                [sg.Image(data=display_image_from_url('https://www.freeiconspng.com/thumbs/heart-icon/valentine-heart-icon-6.png'), subsample=15, key='star', visible=True if entry.favorite else False)]
+            ], element_justification='c'),
+            sg.Column([
+                [sg.Text(entry.title, font="Helvetica 16", size=(15, round(len(entry.title) / 15)), pad=(0, 0), key='-Title-')],
+                [sg.Text(f"{entry.year_released} | {entry.runtime} min | {entry.certificate}", pad=(0, 0), key='-Details-')],
+                [sg.Text(f"Directed by: {', '.join(entry.director)}", pad=(0, 0), key='-Director-')],
+                [sg.Text(", ".join(entry.cast[:3]), pad=(0, 10), key='-Cast-')],
+                [sg.Text(entry.plot, size=(60, round(len(entry.plot) / 60)), pad=(0, 0), key='-Plot-')]
+            ])
+        ],
+        [sg.Text(f"Year Watched: {entry.year_watched}", key='-YearWatched-')],
+        [sg.Button("Remove from Favorites" if entry.favorite else "Add to Favorites", key="-AddtoFav-", visible=True if entry.watched else False)],
+        [sg.Button("Remove from Database" if entry.watched else "Add to Database", key="-LOGGED-"), sg.Button("Close")]
+    ]
+
+    mov_popup = sg.Window("Movie Details", layout, size=(700, 400))
+
+    while True:
+        event, values = mov_popup.read()
+        if event in (sg.WINDOW_CLOSED, "Close"):
+            break
+        elif event == "-LOGGED-":
+            if entry.watched:
+                database.pop(index)  # Directly use index
+                window['-TableDat-'].update(values=[[row[0], row[1], row[2]] for row in database])
+                entry.watched = 0
+                entry.favorite = 0
+                entry.year_watched = 0
+                mov_popup['-AddtoFav-'].update(visible=False)
+                mov_popup['-LOGGED-'].update("Add to Database")
+                mov_popup['-YearWatched-'].update(f"Year Watched: {entry.year_watched}")
+                mov_popup['star'].update(visible=False)
+            else:
+                year = sg.popup_get_text("Enter Year Watched")
+                entry.year_watched = year
+                database.append([entry.title, entry.year_released, ", ".join(entry.director), entry])
+                window['-TableDat-'].update(values=[[row[0], row[1], row[2]] for row in database])
+                entry.watched = 1
+                mov_popup['-AddtoFav-'].update(visible=(True))
+                mov_popup['-LOGGED-'].update("Remove from Database")
+                mov_popup['-YearWatched-'].update(("Year Watched: {entry.year_watched}"))
+        elif event == "-AddtoFav-":
+            if entry.favorite == 0:
+                entry.favorite = 1
+                mov_popup['star'].update(visible=True)
+                mov_popup['-AddtoFav-'].update("Remove from Favorites")
+                print('Added to Favorites')
+            else:
+                entry.favorite = 0
+                mov_popup['star'].update(visible=False)
+                mov_popup['-AddtoFav-'].update("Add to Favorites")
+                print('Removed from Favorites')
+                
+    mov_popup.close()
+
+def get_top3(attribute):
+    counter = Counter()
+    for entry in database:
+        movie = entry[3]
+        if hasattr(movie, attribute):
+            attr_values = getattr(movie, attribute)
+            if isinstance(attr_values, list):
+                counter.update(attr_values)
+            else:
+                counter.update([attr_values])
+    top3 = counter.most_common(3)
+    return top3
+
+def update_metadata():
+    top3_casts = get_top3('cast')
+    top3_directors = get_top3('director')
+    window['-TopCasts-'].update(f"Most Watched Actors: {top3_casts}")
+    window['-TopDirectors-'].update(f"Most Watched Directors: {top3_directors}")
+
+# Layouts
+layout1 = [
+    [sg.Button("View Database", key='-ViewDat-')],
+    [sg.Text("Enter movie title:"), sg.InputText()],
+    [sg.Button("Search"), sg.ProgressBar(1000, orientation='h', size=(20, 20), key='progressbar', visible=False)],
+    [sg.Table(values=[], headings=['Title', 'Year', 'Director'], enable_events=True, key='-TableSearch-', auto_size_columns=False, justification='center', col_widths=(50, 10, 20), hide_vertical_scroll=True, visible=False)]
+]
+
+layout2 = [[sg.Column([
+    [sg.Button("Add to Database", key='-ViewSearch-'), sg.Button("View Metadata", key='-ViewMetaData-'), sg.Button("Export to CSV", key='-Export-'),sg.Button("Update Database",key='-Update-')],
+    [sg.Text("Database")],
+    [sg.Table(values=[[row[0], row[1], row[2]] for row in database], headings=['Title', 'Year', 'Director'], justification='center',expand_x = True, enable_events=True, auto_size_columns=False, col_widths=(50, 10, 20), key='-TableDat-')]
+], element_justification= 'c')]
+
+]
+
+layout3 = [
+    [sg.Button("View Database", key='-ViewData-')],
+    [sg.Text("", key='-TopCasts-')],
+    [sg.Text("", key='-TopDirectors-')]
+]
+
+layout = [
+    [sg.Column(layout1, key='-COL1-'), sg.Column(layout2, visible=False, key='-COL2-'), sg.Column(layout3, visible=False, key='-COL3-')]
+]
+
+# Create the window
+window = sg.Window("Movie Database", layout, size=(1000, 400))
+
+# Event loop
+while True:
+    event, values = window.read()
+    if event in (sg.WINDOW_CLOSED, "Close"):
+        break
+    elif event == 'Search':
+        results = search_mov(values[0])
+        results_display = mov_display_row(results)
+        window['-TableSearch-'].update(values=results_display)
+        window['-TableSearch-'].update(visible=True)
+        window['progressbar'].update(visible=False)
+        window['-TableSearch-'].Widget.configure(selectmode='browse')
+    elif event == '-ViewDat-':
+        window['-COL1-'].update(visible=False)
+        window['-COL3-'].update(visible=(False))
+        window['-TableDat-'].update(values=[[row[0], row[1], row[2]] for row in database])
+        window['-COL2-'].update(visible=(True))
+    elif event == '-ViewData-':
+        window['-COL1-'].update(visible=(False))
+        window['-COL3-'].update(visible=(False))
+        window['-TableDat-'].update(values=[[row[0], row[1], row[2]] for row in database])
+        window['-COL2-'].update(visible=(True))
+    elif event == '-ViewSearch-':
+        window['-COL2-'].update(visible=(False))
+        window['-COL1-'].update(visible=(True))
+    elif event == '-ViewMetaData-':
+        update_metadata()
+        window['-COL2-'].update(visible=(False))
+        window['-COL3-'].update(visible=(True))
+    elif event == '-Export-':
+        os.makedirs(folder_path, exist_ok=True)
+        export_to_csv(filepath, database)
+        sg.popup_ok("Export Successful")
+    elif event == '-Update-':
+        update_database()
+    elif event == '-TableSearch-':
+        selected_rows = values['-TableSearch-']
+        if selected_rows:
+            selected_row_index = selected_rows[0]
+            selected_row_entry = results_display[selected_row_index][3]
+            open_mov_popup(selected_row_entry)
+    elif event == '-TableDat-':
+        selected_rows = values['-TableDat-']
+        if selected_rows:
+            selected_row_index = selected_rows[0]
+            selected_row_entry = database[selected_row_index][3]
+            open_mov_popup(selected_row_entry, selected_row_index)
+
+# Close the window
+window.close()
